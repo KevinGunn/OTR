@@ -1,0 +1,2 @@
+cpu-bind-cores=UNK  - hpc-node03, task  0  0 [61124]: mask 0x8080808080808080 set
+WARNING: ignoring environment value of R_HOME
