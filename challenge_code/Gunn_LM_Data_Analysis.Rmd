@@ -1,0 +1,91 @@
+---
+title: "LibertyMutual_Problem"
+author: "Kevin Gunn"
+date: "February 14, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis and Feature Engineering 
+
+Load data and necessary libraries in R.  
+```{r, warning=FALSE, message=FALSE}
+library(FactoMineR)
+library(reshape2)
+library(ggplot2)
+library(knitr)
+library(randomForest)
+library(ggplot2)
+library(readr)
+
+CED <- read_csv("C:/Users/kpgunn/Documents/LibMut/CodingExerciseDataset.csv")
+```
+
+### Part (A)
+
+Next, let's summarize the dataset.
+```{r, results='asis'}
+
+dim(CED)
+
+# Find number of demographic variables. This is the last column with demographic information.
+which(colnames(CED)=="purchase_pwr_cls")
+
+which(colnames(CED)=="contrib_ss") - which(colnames(CED)=="purchase_pwr_cls")
+
+which(colnames(CED)=="num_ss") - which(colnames(CED)=="contrib_ss")
+```
+
+There are 8,000 customers and 80 variables and 1 response variable. There are 38 demographic variables and 42 Product Usage variables. The first 21 product usage variables are related to monetary contributions to different types of insurance policies. The last 21 product usage variables are related to number of different types of insurance policies owned.
+
+```{r}
+# Check for missing data but there is no missing data.
+#colMeans(is.na(CED))
+
+# Examine the type of variables in the data set.
+#kable(apply(CED,2,class),caption = "Variable Types")
+
+all(apply(CED,2,is.character))
+```
+
+The variables are all characters in R, but we should transform them to factors for our analysis. There are no missing data present in this data set.
+
+
+```{r}
+
+CEDf <- data.frame(apply(CED,2,as.factor)) 
+
+
+pt = prop.table(table(CEDf$mobile_home_policy))
+pt_frame=as.data.frame(pt)
+names(pt_frame)[1] = 'Response' 
+
+kable(pt_frame, format = "html",caption = "Mobile Home Policy")
+
+```
+
+The proportion of customers with a mobile home policy is roughly 5%. This is a small proportion of the customers in this data set and the model development portion of this challenge will need to adapt for this issue.
+
+### Part (B)
+
+In this section, 2-3 visual artifacts will be provided to find the most important relationships between variables.
+
+```{r}
+# Matrix of just independent variables.
+X = as.data.frame(CEDf[,-81])
+
+res = MFA(X, group=c(38,21,21), type=rep("n",3) , ncp=5, name.group=c("Demographics", "Monetary","Quantity"))
+
+```
+
+
+
+
+
+
+
+
+
