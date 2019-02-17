@@ -1,5 +1,5 @@
 ---
-title: "LibertyMutual_Problem"
+title: "Liberty Mutual Challenge"
 author: "Kevin Gunn"
 date: "February 14, 2019"
 output: html_document
@@ -13,15 +13,28 @@ knitr::opts_chunk$set(echo = TRUE)
 
 Load data and necessary libraries in R.  
 ```{r, warning=FALSE, message=FALSE}
+
+library(gbm)
+library(purrr)
+library(ranger)
+library(caret)
+library(DMwR)
+library(pROC)
+library(ClustOfVar)
+library(klaR)
+library(gridExtra)
 library(FactoMineR)
+library(factoextra)
 library(reshape2)
 library(ggplot2)
 library(knitr)
+
 library(randomForest)
-library(ggplot2)
+library(dplyr)
 library(readr)
 
 CED <- read_csv("C:/Users/kpgunn/Documents/LibMut/CodingExerciseDataset.csv")
+
 ```
 
 ### Part (A)
@@ -34,36 +47,39 @@ dim(CED)
 # Find number of demographic variables. This is the last column with demographic information.
 which(colnames(CED)=="purchase_pwr_cls")
 
+#PU - Montary columns
 which(colnames(CED)=="contrib_ss") - which(colnames(CED)=="purchase_pwr_cls")
-
+#PU - Quantity columns
 which(colnames(CED)=="num_ss") - which(colnames(CED)=="contrib_ss")
 ```
 
-There are 8,000 customers and 80 variables and 1 response variable. There are 38 demographic variables and 42 Product Usage variables. The first 21 product usage variables are related to monetary contributions to different types of insurance policies. The last 21 product usage variables are related to number of different types of insurance policies owned.
+There are 8,000 customers, 80 explanatory variables, and 1 response variable. There are 38 demographic variables and 42 Product Usage variables. The first 21 product usage variables are related to monetary contributions to different types of insurance policies. The last 21 product usage variables are related to number of different types of insurance policies owned.
 
 ```{r}
 # Check for missing data but there is no missing data.
 #colMeans(is.na(CED))
 
-# Examine the type of variables in the data set.
-#kable(apply(CED,2,class),caption = "Variable Types")
-
 all(apply(CED,2,is.character))
 ```
 
-The variables are all characters in R, but we should transform them to factors for our analysis. There are no missing data present in this data set.
+The variables are all characters in R, but we should transform them to factors for our analysis. Most variables are ordinal based on the data dictonary provided. There are no missing data present in this data set.
 
 
 ```{r}
 
-CEDf <- data.frame(apply(CED,2,as.factor)) 
+CEDf <- as.data.frame(sapply(CED, as.factor))
 
+unique_factor_levels = apply(CEDf,2,function(x){length(unique(x))})
+count_vars_df = as.data.frame(table(unique_factor_levels))
+names(count_vars_df)[1] = 'Lvls' 
+
+kable(count_vars_df, format = "html",caption = "Distribution of Unique Levels")
 
 pt = prop.table(table(CEDf$mobile_home_policy))
 pt_frame=as.data.frame(pt)
 names(pt_frame)[1] = 'Response' 
 
-kable(pt_frame, format = "html",caption = "Mobile Home Policy")
+kable(pt_frame, format = "html",caption = "Mobile Home Policy Proportions")
 
 ```
 
@@ -71,21 +87,396 @@ The proportion of customers with a mobile home policy is roughly 5%. This is a s
 
 ### Part (B)
 
-In this section, 2-3 visual artifacts will be provided to find the most important relationships between variables.
+In this section, 2-3 visual artifacts will be provided to find the most important relationships between variables. ### NOTE DO MFA FIRST AND THEN MCA WITHIN VARIABLE TYPES ###
 
-```{r}
+```{r,fig.align='center',fig.width=6}
+
 # Matrix of just independent variables.
 X = as.data.frame(CEDf[,-81])
 
-res = MFA(X, group=c(38,21,21), type=rep("n",3) , ncp=5, name.group=c("Demographics", "Monetary","Quantity"))
+MFA_X = MFA(X, group=c(38,21,21), type=rep("n",3) , ncp=5, 
+            name.group=c("Demographics", "Monetary","Quantity"),
+            graph=FALSE)
+
+# Color palette:
+cbb <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+
+# Examine Variable groups that contribute to variation within Eigenvectors.
+fviz_mfa_var(MFA_X, "group", palette = cbb, col.var = c("Demographic","PU-Monetary","PU-Quantity"),xlim=c(-0.2,1))
+
+```
+
+
+```{r,fig.align='center',fig.width=8.5}
+
+# Examine variables that contribute the most to variation in Eigenvectors 1 and 2.
+plot1 <- fviz_contrib(MFA_X, choice ="quali.var", axes = 1,top=10)
+
+plot2 <- fviz_contrib(MFA_X, choice ="quali.var", axes = 2,top=10,fill="#56B4E9")
+
+grid.arrange(plot1, plot2, ncol=2)
+
+```
+
+```{r, fig.align='center', fig.width=8.5}
+
+CED_SMOTE <- SMOTE(mobile_home_policy~., data=CEDf,k=5,
+                   perc.under = 200,perc.over = 200)
+# Variable Importance Measures
+rf1 <- randomForest(mobile_home_policy ~ . ,data=CED_SMOTE)
+
+varImpPlot(rf1, main="Important Variables in RF SMOTE model")
+
+Imp <- importance(rf1)
+
+# After examining plot lets choose value with MDG > 11.
+ImpVars<- rownames(Imp)[Imp>20]
+
+```
+
+
+```{r}
+
+# Feature Engineering
+
+# First reduce to only important variables.
+CEDf2 <- CEDf[,which(colnames(CEDf) %in% ImpVars)]
+
+# one-hot encoding
+dmy <- dummyVars(" ~ .", data = CEDf2)
+CED.OH <- cbind( data.frame(predict(dmy, newdata = CEDf2)), 
+                 mobile_home_policy=CEDf$mobile_home_policy )
+
+
+```
+
+
+Create count variables. One for PUM, PUQ, Important variables based on MFA counts.
+
+##  Model Building and Evaluation 
+
+```{r}
+
+set.seed(1234)
+splitIndex <- createDataPartition(CED.OH$mobile_home_policy, p = .7,
+                                  list = FALSE,
+                                  times = 1)
+trainSplit <- CED.OH[ splitIndex,]
+testSplit <- CED.OH[-splitIndex,]
+
+
+# SMOTE more positive cases
+
+#trainSplit$mobile_home_policy <- as.factor(trainSplit$mobile_home_policy)
+trainSplit <- SMOTE(mobile_home_policy ~ ., trainSplit, perc.over = 100) #perc.under=200)
+
+#trainSplit$mobile_home_policy <- as.numeric(trainSplit$mobile_home_policy)
+
+prop.table(table(trainSplit$mobile_home_policy))
+
+prop.table(table(testSplit$mobile_home_policy))
+
+rf_grid <- expand.grid(mtry = c(5, 10, 20, 30),
+                      splitrule = c("gini", "extratrees"),
+                      min.node.size = c(5, 10, 15))
+rf_grid
+
+# evaluate the SMOTE performance
+tbmodel <- train(as.factor(mobile_home_policy) ~ ., data = trainSplit, 
+                 method = "treebag")
+
+#tbmodel <- train(as.factor(mobile_home_policy) ~ ., data = trainSplit, 
+#                 method = "ranger",
+#                 tuneGrid = rf_grid)
+
+predictors <- names(trainSplit)[names(trainSplit) != 'mobile_home_policy']
+pred <- predict(tbmodel$finalModel, testSplit[,predictors])
+#pred <- as.numeric(as.character(pred$predictions))
+pred <- as.numeric(as.character(pred))
+
+# evaluate the model's performance
+auc <- roc(as.numeric(testSplit$mobile_home_policy), pred)
+print(auc)
+
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+```
+
+
+```{r}
+library(xgboost)
+
+parametersGrid <-  expand.grid(eta = 0.1, 
+                            colsample_bytree=c(0.5,0.7),
+                            max_depth=c(3,6),
+                            nrounds=100,
+                            gamma=1,
+                            min_child_weight=2,
+                            subsample = c(0.3,0.5,0.7)
+                            )
+
+ControlParamteres <- trainControl(method = "cv",
+                                  number = 5,
+                                  savePredictions = TRUE,
+                                  classProbs = TRUE
+)
+
+modelxgboost <- train(as.factor(mobile_home_policy) ~., 
+                  data = trainSplit,
+                  method = "xgbTree",
+                  #trControl = ControlParamteres,
+                  tuneGrid=parametersGrid)
+
+predictors <- names(trainSplit)[names(trainSplit) != 'mobile_home_policy']
+pred <- predict(modelxgboost, testSplit[,predictors])
+#pred <- as.numeric(as.character(pred$predictions))
+pred <- as.numeric(as.character(pred))
+
+ptab<-table(predictions=pred,actual=testSplit$mobile_home_policy)
+ptab
+
+# evaluate the model's performance
+auc <- roc(as.numeric(testSplit$mobile_home_policy), pred)
+print(auc)
+
+plot(auc, ylim=c(0,1), print.thres=TRUE, main=paste('AUC:',round(auc$auc[[1]],2)))
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+```
+
+
+```{r}
+
+svm_Radial <- train(V14 ~., data = training, method = "svmRadial",
+  trControl=trctrl,
+  preProcess = c("center", "scale"),
+  tuneLength = 10)
+
+plot(svm_Radial)
+
+test_pred_Radial <- predict(svm_Radial, newdata = testing)
+confusionMatrix(test_pred_Radial, testSplit$mobile_home_policy )
+
+```
+
+
+```{r}
+library(glm)
+library(glmnet)
+
+library(fastAdaboost)
+
+set.seed(123)
+
+splitIndex <- createDataPartition(CED.OH$mobile_home_policy, p = .7,
+                                  list = FALSE,
+                                  times = 1)
+trainSplit <- CED.OH[ splitIndex,]
+testSplit <- CED.OH[-splitIndex,]
+
+# Set up control function for training
+
+ctrl <- trainControl(method = "repeatedcv",
+                     number = 10,
+                     repeats = 5,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+# Build a standard classifier using a gradient boosted machine
+
+orig_fit <- train(make.names(mobile_home_policy) ~ .,
+                  data = trainSplit,
+                  method = "gbm",
+                  verbose = FALSE,
+                  metric = "ROC",
+                  trControl = ctrl)
+
+orig_preds <- predict(orig_fit, testSplit,type = "raw")
+
+glmnet_fit <- train(make.names(mobile_home_policy) ~ ., 
+                    data = trainSplit,
+                    method = "glmnet",
+                    metric = "ROC",
+                    tuneLength = 3,
+                    trControl =  ctrl)
+
+glmnet_preds <- predict(glmnet_fit, testSplit,type = "raw")
+
+ada_fit <- train(make.names(mobile_home_policy) ~ ., 
+                    data = trainSplit,
+                    method = "adaboost",
+                    metric = "ROC",
+                    trControl =  ctrl)
+
+ada_preds <- predict(ada_fit, testSplit,type = "raw")
+
+# Build custom AUC function to extract AUC
+# from the caret model object
+
+# Build smote model
+ctrl$seeds <- orig_fit$control$seeds
+ctrl$sampling <- "smote"
+
+smote_fit <- train(make.names(mobile_home_policy) ~ .,
+                   data = trainSplit,
+                   method = "gbm",
+                   verbose = FALSE,
+                   metric = "ROC",
+                   trControl = ctrl)
+
+smote_glmnet_fit <- train(make.names(mobile_home_policy) ~ ., 
+                    data = trainSplit,
+                    method = "glmnet",
+                    metric = "ROC",
+                    tuneLength = 3,
+                    trControl =  ctrl)
+
+# Examine results for test set
+
+auc_of <- roc(testSplit$mobile_home_policy,
+      predict(orig_fit, testSplit,type = "prob")[, 2])
+
+auc_glmnet <- roc(testSplit$mobile_home_policy,
+      predict(glmnet_fit, testSplit,type = "prob")[, 2])
+
+auc_smote_glmnet <- roc(testSplit$mobile_home_policy,
+      predict(smote_glmnet_fit, testSplit,type = "prob")[, 2])
+
+auc_smote <- roc(testSplit$mobile_home_policy,
+      predict(smote_fit, testSplit, type = "prob")[, 2])
+      
+plot(auc_of, ylim=c(0,1), print.thres=TRUE, main=paste('AUC_OF:',round(auc_of$auc[[1]],2),"and",'AUC_Smote:',round(auc_smote$auc[[1]],2)))
+lines(auc_rf,col="green")
+lines(auc_smote,col="purple")
+abline(h=1,col='blue',lwd=2)
+abline(h=0,col='red',lwd=2)
+
+
+print(postResample(pred=predictions, obs=make.names(CEDf$mobile_home_policy)))
+
+#save(model, file="C:/Users/kpgunn/Documents/LibMut/rf_fit.Rdata")
+#save(smote_fit, file="C:/Users/kpgunn/Documents/LibMut/smote_fit.Rdata")
+#save(orig_fit, file="C:/Users/kpgunn/Documents/LibMut/orig_fit.Rdata")
+
+#load("C:/Users/kpgunn/Documents/LibMut/rf_fit.Rdata")
+#load("C:/Users/kpgunn/Documents/LibMut/smote_fit.Rdata")
+#load("C:/Users/kpgunn/Documents/LibMut/orig_fit.Rdata")
+
+```
+```{r}
+
+
+# Lets try balanced RF.
+
+Y = trainSplit$mobile_home_policy
+Folds <- createFolds(Y,k=5)
+#Compute weights to balance the RF
+ww <- 1/table(Y)
+w <- w/sum(ww)
+weights <- rep(0, length(Y))
+weights[Y == 0] <- w['0']
+weights[Y == 1] <- w['1']
+table(weights, Y)
+
+rf_grid <- expand.grid(num.trees=c(500,1000,1500),mtry=c(10,15,20))
+roc_fold <- matrix(0,nrow=5,ncol=dim(rf_grid)[1])
+
+for(i in 1:length(Folds)){
+  #print(i)
+  test.rows = Folds[[i]]
+  x.test = trainSplit[test.rows,-285]
+  y.test = Y[test.rows]
+  x.train = trainSplit[-test.rows,-285]
+  y.train = Y[-test.rows]
+  w.train = weights[-test.rows]
+  
+  test_df = as.data.frame(cbind(x.test,y.test))
+
+  #Fit the RF
+  for(j in 1:dim(rf_grid)[1]){
+    model <- ranger(y.train ~ . , x.train, num.trees = rf_grid[j,1], mtry = rf_grid[j,2], case.weights=w.train)
+    
+    preds <- predict(model,test_df)
+    
+    #print(i);print(j)
+    roc_fold[i,j] <- roc(y.test,as.numeric(as.character(preds$predictions)))$auc[1]
+  }
+  #print(model)
+  
+}
+
+colMeans(roc_fold)
+
+```
+
+### Cost-Sensitive Training. 
+```{r}
+
+fiveStats <- function(...) c(twoClassSummary(...), defaultSummary(...))
+## Everything but the area under the ROC curve:
+fourStats <- function (data, lev = levels(data$obs), model = NULL){
+
+ accKapp <- postResample(data[, "pred"], data[, "obs"])
+ out <- c(accKapp,
+ sensitivity(data[, "pred"], data[, "obs"], lev[1]),
+ specificity(data[, "pred"], data[, "obs"], lev[2]))
+ names(out)[3:4] <- c("Sens", "Spec")
+ out
+}
+
+set.seed(1234)
+
+ctrl <- trainControl(method = "cv",
+ number= 5,
+ classProbs = TRUE,
+ summaryFunction = fiveStats,
+ verboseIter = TRUE)
+
+ctrlNoProb <- ctrl
+ctrlNoProb$summaryFunction <- fourStats
+ctrlNoProb$classProbs <- FALSE
+
+library(kernlab)
+## We will train over a large cost range, so we precompute the sigma
+## parameter and make a custom tuning grid:
+set.seed(12345)
+
+novar = names(trainSplit[, sapply(trainSplit, function(v) var(v, na.rm=TRUE)==0)])
+trainSplit <- trainSplit[,!(names(trainSplit)%in%novar)]
+testSplit <- testSplit[,!(names(testSplit)%in%novar)]
+
+sigma <- sigest(mobile_home_policy ~ ., data = trainSplit, frac = .75)
+names(sigma) <- NULL
+svmGrid <- data.frame(sigma=sigma[2], C = 2^seq(-6, 1, length = 15))
+## Class probabilities cannot be generated with class weights, so
+## use the control object 'ctrlNoProb' to avoid estimating the
+## ROC curve.
+set.seed(123456)
+SVMwts <- train(make.names(mobile_home_policy) ~ . ,
+data = trainSplit,
+method = "svmRadial",
+tuneGrid = svmGrid,
+class.weights = c( X0=1, X1=20),
+metric = "Sens",
+trControl = ctrlNoProb)
+
+SVMwts
 
 ```
 
 
 
+Fitting a model on original data cannot detect any 
 
+```{r}
 
+test_response = (make.names(testSplit$mobile_home_policy))
+tr = as.factor(test_response)
 
+preds_smote = predict(smote_fit, testSplit, type = "raw")
+confusionMatrix(preds_smote,  tr, positive = "X1")
 
-
-
+```
