@@ -1,0 +1,33 @@
+---
+title: "LibertyMutual_Problem"
+author: "Kevin Gunn"
+date: "February 14, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis and Feature Engineering 
+
+Load data and necessary libraries in R.  
+```{r message=FALSE}
+library(readr)
+Coding_Exercise_Dataset <- read_csv("LibMut/Coding Exercise Dataset.csv")
+```
+
+
+```{r cars}
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
